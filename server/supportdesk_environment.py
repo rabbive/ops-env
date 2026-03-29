@@ -13,6 +13,7 @@ try:
         DraftState,
         ResourceCard,
         ResourceDetail,
+        Reward,
         SearchResult,
         SupportDeskAction,
         SupportDeskObservation,
@@ -27,6 +28,7 @@ except ImportError:  # pragma: no cover - source-tree fallback
         DraftState,
         ResourceCard,
         ResourceDetail,
+        Reward,
         SearchResult,
         SupportDeskAction,
         SupportDeskObservation,
@@ -40,7 +42,7 @@ except ImportError:  # pragma: no cover - source-tree fallback
 class SupportDeskEnvironment(Environment):
     """Deterministic support-triage environment."""
 
-    def __init__(self, max_steps: int = 12):
+    def __init__(self, max_steps: int = 20):
         self.max_steps = max_steps
         self._state = SupportDeskState(episode_id=str(uuid4()), step_count=0)
         self._last_open_resource_id: Optional[str] = None
@@ -412,6 +414,10 @@ class SupportDeskEnvironment(Environment):
             steps_remaining=max(0, self.max_steps - self._state.step_count),
             score=self._state.last_score,
             reward_breakdown=self._last_breakdown,
+            reward_detail=Reward(
+                reward=reward,
+                breakdown=self._last_breakdown,
+            ),
         )
 
     def _build_instructions(self, task: Optional[dict]) -> str:

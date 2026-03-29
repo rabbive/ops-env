@@ -30,7 +30,6 @@ class SupportDeskEnv(EnvClient[SupportDeskAction, SupportDeskObservation, Suppor
             observation=observation,
             reward=payload.get("reward", observation.reward),
             done=payload.get("done", observation.done),
-            info=payload.get("info", observation.metadata),
         )
 
     def _parse_state(self, payload: dict[str, Any]) -> State:

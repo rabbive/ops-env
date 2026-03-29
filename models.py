@@ -101,6 +101,21 @@ class RewardBreakdown(BaseModel):
     completion_score: float = 0.0
 
 
+class Reward(BaseModel):
+    """Top-level reward object returned alongside each observation.
+
+    Wraps the scalar ``reward`` value with the full ``RewardBreakdown`` so
+    consumers get a single typed object instead of a loose float plus an
+    optional breakdown.
+    """
+
+    reward: float = Field(0.0, description="Scalar step reward (score_delta − action_penalty).")
+    breakdown: RewardBreakdown = Field(
+        default_factory=RewardBreakdown,
+        description="Component-level scores and penalty details.",
+    )
+
+
 class SupportDeskAction(Action):
     """Single action surface for support desk operations."""
 
@@ -175,6 +190,7 @@ class SupportDeskObservation(Observation):
     steps_remaining: int = 0
     score: float = 0.0
     reward_breakdown: Optional[RewardBreakdown] = None
+    reward_detail: Optional[Reward] = None
 
 
 class SupportDeskState(State):

@@ -14,11 +14,9 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
 
 COPY . /app/env
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-install-project --no-editable
+RUN uv sync --no-install-project --no-editable
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --no-editable
+RUN uv sync --no-editable
 
 FROM python:3.11-slim
 
@@ -32,7 +30,9 @@ COPY --from=builder /app/env/.venv /app/.venv
 COPY --from=builder /app/env /app/env
 
 ENV PATH="/app/.venv/bin:$PATH"
-ENV PYTHONPATH="/app/env:$PYTHONPATH"
+ENV PYTHONPATH="/app/env"
+# Gradio UI at /web (redirects to /web/) for Hugging Face Spaces and manual debugging.
+ENV ENABLE_WEB_INTERFACE=true
 
 EXPOSE 8000
 

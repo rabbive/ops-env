@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
+import sys
 import textwrap
 from typing import Any
 
@@ -16,11 +18,17 @@ except ImportError:  # pragma: no cover - source-tree fallback
     from client import SupportDeskEnv
     from models import SupportDeskAction
 
+try:
+    from scripted_baselines import run_all_scripted
+except ImportError:  # pragma: no cover - source-tree fallback
+    run_all_scripted = None  # type: ignore[misc, assignment]
+
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY")
 MODEL_NAME = os.getenv("MODEL_NAME")
 ENV_BASE_URL = os.getenv("ENV_BASE_URL")
-MAX_STEPS = int(os.getenv("MAX_STEPS", "12"))
+# Hard tasks need 13+ environment steps (search, opens, draft, submit); keep headroom.
+MAX_STEPS = int(os.getenv("MAX_STEPS", "20"))
 TEMPERATURE = 0
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "350"))
 IMAGE_NAME = os.getenv("ENV_IMAGE_NAME", "supportdesk-env:latest")
@@ -166,6 +174,29 @@ def run_task(env: Any, client: OpenAI, task_id: str) -> float:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="LLM or scripted baseline for supportdesk_env.")
+    parser.add_argument(
+        "--scripted",
+        action="store_true",
+        help=(
+            "Replay deterministic gold trajectories in-process (no LLM). "
+            "Reproducible scores for CI and grader smoke tests."
+        ),
+    )
+    args = parser.parse_args()
+
+    if args.scripted:
+        if run_all_scripted is None:
+            print("scripted_baselines module not found.", file=sys.stderr)
+            sys.exit(1)
+        scores = run_all_scripted()
+        average = sum(scores.values()) / len(scores)
+        print("=== Scripted baseline (deterministic gold trajectories, no LLM) ===")
+        for task_id, score in scores.items():
+            print(f"{task_id}: {score:.3f}")
+        print(f"average: {average:.3f}")
+        return
+
     if not MODEL_NAME:
         raise RuntimeError("MODEL_NAME must be set.")
     if not API_KEY:
@@ -174,10 +205,11 @@ def main() -> None:
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
     if ENV_BASE_URL:
-        env = SupportDeskEnv(base_url=ENV_BASE_URL)
+        raw_env = SupportDeskEnv(base_url=ENV_BASE_URL)
     else:
-        env = SupportDeskEnv.from_docker_image(IMAGE_NAME)
+        raw_env = SupportDeskEnv.from_docker_image(IMAGE_NAME)
 
+    env = raw_env.sync()
     scores: dict[str, float] = {}
     try:
         for task_id in TASK_ORDER:

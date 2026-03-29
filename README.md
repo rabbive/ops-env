@@ -2,7 +2,7 @@
 title: Support Desk Environment
 emoji: 📨
 colorFrom: blue
-colorTo: teal
+colorTo: green
 sdk: docker
 pinned: false
 app_port: 8000
@@ -107,6 +107,8 @@ reward = current_partial_score - previous_partial_score - action_penalty
 
 Penalties apply to invalid actions, repeated no-progress actions, empty saves, and premature submission. This gives dense trajectory feedback instead of a single sparse reward at episode end.
 
+Episodes allow up to **20** environment steps by default so harder tickets can complete (search, multiple document opens, draft fields, submit) without hitting the limit early.
+
 ## Layout
 
 ```text
@@ -120,6 +122,11 @@ Penalties apply to invalid actions, repeated no-progress actions, empty saves, a
 ├── openenv.yaml
 ├── pyproject.toml
 ├── README.md
+├── scripted_baselines.py
+├── scripts/
+│   └── validate_submission.sh
+├── docs/
+│   └── HF_SPACE.md
 ├── server/
 │   ├── app.py
 │   ├── grader.py
@@ -176,20 +183,22 @@ with SupportDeskEnv(base_url="http://localhost:8000").sync() as env:
 
 ## Baselines
 
-### Deterministic Reference Trajectories
+### Scripted baseline (reproducible, no API keys)
 
-The gold trajectories encoded in `tests/` and mirrored by the environment's hidden rubric achieve:
+Gold trajectories in [`scripted_baselines.py`](scripted_baselines.py) replay the same actions pytest uses for smoke tests. This is the fastest way to confirm the grader reaches the ceiling without an LLM:
 
-| Task | Score |
+```bash
+uv run python inference.py --scripted
+```
+
+| Task | Scripted score |
 | --- | ---: |
-| Easy | 1.00 |
-| Medium | 1.00 |
-| Hard | 1.00 |
-| Average | 1.00 |
+| `task_easy_password_reset` | 1.00 |
+| `task_medium_duplicate_charge` | 1.00 |
+| `task_hard_security_incident` | 1.00 |
+| **Average** | **1.00** |
 
-These are useful as a smoke-test ceiling and verify grader determinism.
-
-### OpenAI Baseline
+### LLM baseline (OpenAI-compatible client)
 
 `inference.py` runs an OpenAI-compatible chat model against the environment in fixed task order with `temperature=0` for reproducibility. Set:
 
@@ -197,29 +206,45 @@ These are useful as a smoke-test ceiling and verify grader determinism.
 - `MODEL_NAME`
 - `HF_TOKEN` or `OPENAI_API_KEY`
 
-Then run:
+Optional: `ENV_BASE_URL` pointing at a running server (recommended for judges and CI). If unset, the client tries `SupportDeskEnv.from_docker_image` using `ENV_IMAGE_NAME` (default `supportdesk-env:latest`).
 
 ```bash
+export API_BASE_URL="https://api.openai.com/v1"
+export MODEL_NAME="gpt-4.1-mini"
+export OPENAI_API_KEY="..."
+export ENV_BASE_URL="http://localhost:8000"
 uv run python inference.py
 ```
 
-The script prints per-task scores and an average score. If `ENV_BASE_URL` is unset, it will try to launch `supportdesk-env:latest` locally through the OpenEnv client.
+Record the printed per-task scores in your submission notes; they depend on the model and provider. Keep `MAX_STEPS` at the default (20) unless you are debugging shorter rollouts.
+
+**Sample LLM baseline** (`Qwen/Qwen2.5-72B-Instruct` via HF Inference Router, `temperature=0`):
+
+| Task | LLM score | Notes |
+| --- | ---: | --- |
+| `task_easy_password_reset` | — | _pending: fill after running with active credits_ |
+| `task_medium_duplicate_charge` | — | |
+| `task_hard_security_incident` | — | |
+| **Average** | **—** | |
+
+The scripted ceiling is **1.00** on all tasks; LLM scores below that reflect the model's ability to follow structured action schemas, gather evidence before acting, and avoid repetitive searches. Scores are fully deterministic at `temperature=0`.
 
 ## Hugging Face Space Deployment
 
-This repository is already structured as a Docker Space. After logging in and setting `HF_TOKEN`, push with the OpenEnv CLI:
+This repository is structured as a Docker Space (`sdk: docker`, `app_port: 8000`). See [`docs/HF_SPACE.md`](docs/HF_SPACE.md) for secrets, health checks, and inference against the deployed URL.
+
+After logging in with the Hugging Face CLI (`hf auth login` or `HF_TOKEN` in the environment), push with:
 
 ```bash
-uv run openenv push --repo-id <your-org>/supportdesk-env
+uv run openenv push --repo-id ashwaanthh/supportdesk-env
 ```
 
-The resulting Space should expose:
+**Live Space:** [https://huggingface.co/spaces/ashwaanthh/supportdesk-env](https://huggingface.co/spaces/ashwaanthh/supportdesk-env)
 
-- `/health`
-- `/reset`
-- `/step`
-- `/state`
-- `/web`
+The container sets `ENABLE_WEB_INTERFACE=true`, so a Gradio control panel is mounted at **`/web/`** (with redirects from `/web`). Core OpenEnv endpoints remain:
+
+- `GET /health` — load balancers and automated pings
+- WebSocket and HTTP routes for `reset`, `step`, and `state` as provided by `openenv-core` (use the typed `SupportDeskEnv` client rather than calling raw paths)
 
 ## Notes
 
