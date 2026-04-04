@@ -1,4 +1,13 @@
-"""Baseline inference script for supportdesk_env."""
+"""Baseline inference script for supportdesk_env.
+
+Structured evaluation logs (stdout, one JSON object per line; parseable by automated evaluators):
+
+  [START] {\"phase\":\"run\"|\"scripted\", ...}
+  [STEP]  {\"step\":int,\"task_id\":str,\"action\":{...},\"reward\":float,\"score\":float,\"done\":bool}
+  [END]   {\"phase\":\"run\"|\"scripted\",\"scores\":{...},\"average\":float}
+
+Human-readable progress goes to stderr unless INFERENCE_VERBOSE=0.
+"""
 
 from __future__ import annotations
 
@@ -32,6 +41,7 @@ MAX_STEPS = int(os.getenv("MAX_STEPS", "20"))
 TEMPERATURE = 0
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "350"))
 IMAGE_NAME = os.getenv("ENV_IMAGE_NAME", "supportdesk-env:latest")
+VERBOSE = os.getenv("INFERENCE_VERBOSE", "1") != "0"
 
 TASK_ORDER = [
     "task_easy_password_reset",
@@ -63,6 +73,21 @@ SYSTEM_PROMPT = textwrap.dedent(
     - Keep replies concise and policy-safe.
     """
 ).strip()
+
+
+def _structured_log(tag: str, payload: dict[str, Any]) -> None:
+    """Emit one evaluation line: [TAG] <compact JSON>. Keys sorted for stable ordering."""
+    line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    print(f"[{tag}] {line}")
+
+
+def _log_human(msg: str) -> None:
+    if VERBOSE:
+        print(msg, file=sys.stderr)
+
+
+def _action_json(action: SupportDeskAction) -> dict[str, Any]:
+    return action.model_dump(mode="json", exclude_none=True)
 
 
 def build_prompt(observation: Any) -> str:
@@ -138,11 +163,22 @@ def parse_action(response_text: str) -> SupportDeskAction:
 
 
 def run_task(env: Any, client: OpenAI, task_id: str) -> float:
-    result = env.reset()
-    result = env.step(SupportDeskAction(operation="select_task", task_id=task_id))
+    env.reset()
+    select_action = SupportDeskAction(operation="select_task", task_id=task_id)
+    result = env.step(select_action)
     observation = result.observation
-    print(f"\n=== {task_id} ===")
-    print(f"Task: {observation.task_title}")
+    _structured_log(
+        "STEP",
+        {
+            "action": _action_json(select_action),
+            "done": bool(result.done),
+            "reward": float(result.reward),
+            "score": float(observation.score),
+            "step": 0,
+            "task_id": task_id,
+        },
+    )
+    _log_human(f"\n=== {task_id} ===\nTask: {observation.task_title}")
 
     for step in range(1, MAX_STEPS + 1):
         if result.done:
@@ -159,17 +195,28 @@ def run_task(env: Any, client: OpenAI, task_id: str) -> float:
         )
         response_text = completion.choices[0].message.content or ""
         action = parse_action(response_text)
-        print(f"Step {step}: {action.model_dump(exclude_none=True)}")
+        _log_human(f"Step {step}: {action.model_dump(exclude_none=True)}")
         result = env.step(action)
         observation = result.observation
-        print(
+        _structured_log(
+            "STEP",
+            {
+                "action": _action_json(action),
+                "done": bool(result.done),
+                "reward": float(result.reward),
+                "score": float(observation.score),
+                "step": step,
+                "task_id": task_id,
+            },
+        )
+        _log_human(
             f"  reward={result.reward:.3f} done={result.done} score={observation.score:.3f}"
         )
         if result.done:
             break
 
     final_score = float(observation.score)
-    print(f"Final score: {final_score:.3f}")
+    _log_human(f"Final score: {final_score:.3f}")
     return final_score
 
 
@@ -189,12 +236,36 @@ def main() -> None:
         if run_all_scripted is None:
             print("scripted_baselines module not found.", file=sys.stderr)
             sys.exit(1)
+        _structured_log(
+            "START",
+            {
+                "phase": "scripted",
+                "tasks": list(TASK_ORDER),
+            },
+        )
         scores = run_all_scripted()
-        average = sum(scores.values()) / len(scores)
-        print("=== Scripted baseline (deterministic gold trajectories, no LLM) ===")
         for task_id, score in scores.items():
-            print(f"{task_id}: {score:.3f}")
-        print(f"average: {average:.3f}")
+            _structured_log(
+                "STEP",
+                {
+                    "score": float(score),
+                    "scripted": True,
+                    "task_id": task_id,
+                },
+            )
+        average = sum(scores.values()) / len(scores)
+        _structured_log(
+            "END",
+            {
+                "average": round(average, 6),
+                "phase": "scripted",
+                "scores": {k: float(v) for k, v in scores.items()},
+            },
+        )
+        _log_human("=== Scripted baseline (deterministic gold trajectories, no LLM) ===")
+        for task_id, score in scores.items():
+            _log_human(f"{task_id}: {score:.3f}")
+        _log_human(f"average: {average:.3f}")
         return
 
     if not MODEL_NAME:
@@ -206,8 +277,22 @@ def main() -> None:
 
     if ENV_BASE_URL:
         raw_env = SupportDeskEnv(base_url=ENV_BASE_URL)
+        env_desc: dict[str, Any] = {"env_base_url": ENV_BASE_URL, "kind": "http"}
     else:
         raw_env = SupportDeskEnv.from_docker_image(IMAGE_NAME)
+        env_desc = {"docker_image": IMAGE_NAME, "kind": "docker"}
+
+    _structured_log(
+        "START",
+        {
+            "api_base_url": API_BASE_URL,
+            "max_steps": MAX_STEPS,
+            "model_name": MODEL_NAME,
+            "phase": "run",
+            "tasks": list(TASK_ORDER),
+            **env_desc,
+        },
+    )
 
     env = raw_env.sync()
     scores: dict[str, float] = {}
@@ -218,10 +303,18 @@ def main() -> None:
         env.close()
 
     average = sum(scores.values()) / len(scores)
-    print("\n=== Summary ===")
+    _structured_log(
+        "END",
+        {
+            "average": round(average, 6),
+            "phase": "run",
+            "scores": {k: float(v) for k, v in scores.items()},
+        },
+    )
+    _log_human("\n=== Summary ===")
     for task_id, score in scores.items():
-        print(f"{task_id}: {score:.3f}")
-    print(f"average: {average:.3f}")
+        _log_human(f"{task_id}: {score:.3f}")
+    _log_human(f"average: {average:.3f}")
 
 
 if __name__ == "__main__":

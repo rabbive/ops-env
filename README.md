@@ -7,11 +7,31 @@ sdk: docker
 pinned: false
 app_port: 8000
 base_path: /web
+short_description: >-
+  OpenEnv benchmark for B2B support triage: search internal docs, route tickets, draft notes
+  and customer replies, then submit—deterministic scoring in [0, 1]. Ships FastAPI on :8000
+  plus an optional Gradio panel at /web/ for debugging.
 tags:
 - openenv
 ---
 
 # Support Desk Environment
+
+## What this Hugging Face Space runs
+
+This **Docker Space** hosts the **`supportdesk_env`** OpenEnv server: a **FastAPI** app on port **8000** (see `Dockerfile` and `server/app.py`) built from [`openenv-core`](https://github.com/meta-pytorch/OpenEnv). When the container is healthy you get:
+
+| What | Where / how |
+| --- | --- |
+| **Health** | `GET /health` → `{"status":"healthy"}` for uptime checks |
+| **Environment API** | OpenEnv **`reset`**, **`step`**, **`state`** over HTTP/WebSocket—use the typed Python client [`SupportDeskEnv`](https://huggingface.co/spaces/ashwaanthh/supportdesk-env/blob/main/client.py) (`… .sync()` for synchronous scripts) |
+| **Debug UI** | With `ENABLE_WEB_INTERFACE=true`, a **Gradio** control panel is served under **`/web/`** (and `base_path: /web` in this README) |
+
+**What it does (task):** each episode is a fake support ticket. An agent must **select a task**, **search** and **open** internal resources, set **queue / priority / tags / resolution**, **save** an internal note and a customer **reply**, then **submit**. The server grades deterministically; scripted gold trajectories reach a **1.0** ceiling (see **Baselines** below).
+
+**For remote eval or LLM baselines:** point clients at this Space’s public URL (for example `https://ashwaanthh-supportdesk-env.hf.space`) as `ENV_BASE_URL`, or `http://127.0.0.1:8000` when code runs **inside** the same container. Configure LLM API keys as **Space secrets**—see [`docs/HF_SPACE.md`](docs/HF_SPACE.md).
+
+---
 
 `supportdesk_env` is a deterministic OpenEnv environment for B2B SaaS support operations. An agent must inspect a customer ticket, search internal documentation, route the case correctly, draft an internal note, draft a customer reply, and submit a final resolution through the standard `reset()` / `step()` / `state()` interface.
 
