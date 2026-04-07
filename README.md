@@ -22,6 +22,36 @@ tags:
 
 **Live Space:** `https://ashwaanthh-supportdesk-env.hf.space` (health: `GET /health`, reset: `POST /reset`)
 
+## Architecture
+
+```mermaid
+flowchart LR
+  subgraph Client["Agent / Client"]
+    INF["inference.py\n(OpenAI client)"]
+    SDK["SupportDeskEnv client\n(client.py)"]
+  end
+
+  subgraph Space["Hugging Face Docker Space"]
+    API["FastAPI app\n(server/app.py)"]
+    ENV["SupportDeskEnvironment\n(server/supportdesk_environment.py)"]
+    GR["Grader\n(server/grader.py)"]
+    DATA["Task + rubric data\n(server/task_data.py)"]
+    UI["Optional Gradio UI\n/web/"]
+  end
+
+  LLM["LLM Provider\n(API_BASE_URL + MODEL_NAME)"]
+
+  INF -->|reset/step/state\nHTTP/WebSocket| SDK
+  SDK --> API
+  API --> ENV
+  ENV --> DATA
+  ENV --> GR
+  ENV -->|observations + rewards| API
+  API -->|responses| SDK
+  INF -->|chat.completions| LLM
+  UI --- API
+```
+
 ## What this Hugging Face Space runs
 
 This **Docker Space** hosts the **`supportdesk_env`** OpenEnv server: a **FastAPI** app on port **8000** (see `Dockerfile` and `server/app.py`) built from [`openenv-core`](https://github.com/meta-pytorch/OpenEnv). When the container is healthy you get:
