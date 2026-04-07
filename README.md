@@ -7,11 +7,32 @@ sdk: docker
 pinned: false
 app_port: 8000
 base_path: /web
+short_description: OpenEnv B2B support triage benchmark
 tags:
 - openenv
 ---
 
 # Support Desk Environment
+
+**OpenEnv environment for realistic B2B support-desk triage.** Agents must investigate internal docs, route the ticket, draft an internal note + customer reply, then submit. Scoring is **deterministic** and normalized to **[0.0, 1.0]**.
+
+**Live Space:** `https://ashwaanthh-supportdesk-env.hf.space` (health: `GET /health`, reset: `POST /reset`)
+
+## What this Hugging Face Space runs
+
+This **Docker Space** hosts the **`supportdesk_env`** OpenEnv server: a **FastAPI** app on port **8000** (see `Dockerfile` and `server/app.py`) built from [`openenv-core`](https://github.com/meta-pytorch/OpenEnv). When the container is healthy you get:
+
+| What | Where / how |
+| --- | --- |
+| **Health** | `GET /health` → `{"status":"healthy"}` for uptime checks |
+| **Environment API** | OpenEnv **`reset`**, **`step`**, **`state`** over HTTP/WebSocket—use the typed Python client [`SupportDeskEnv`](https://huggingface.co/spaces/ashwaanthh/supportdesk-env/blob/main/client.py) (`… .sync()` for synchronous scripts) |
+| **Debug UI** | With `ENABLE_WEB_INTERFACE=true`, a **Gradio** control panel is served under **`/web/`** (and `base_path: /web` in this README) |
+
+**What it does (task):** each episode is a fake support ticket. An agent must **select a task**, **search** and **open** internal resources, set **queue / priority / tags / resolution**, **save** an internal note and a customer **reply**, then **submit**. The server grades deterministically; scripted gold trajectories reach a **1.0** ceiling (see **Baselines** below).
+
+**For remote eval or LLM baselines:** point clients at this Space’s public URL (for example `https://ashwaanthh-supportdesk-env.hf.space`) as `ENV_BASE_URL`, or `http://127.0.0.1:8000` when code runs **inside** the same container. Configure LLM API keys as **Space secrets**—see [`docs/HF_SPACE.md`](docs/HF_SPACE.md).
+
+---
 
 `supportdesk_env` is a deterministic OpenEnv environment for B2B SaaS support operations. An agent must inspect a customer ticket, search internal documentation, route the case correctly, draft an internal note, draft a customer reply, and submit a final resolution through the standard `reset()` / `step()` / `state()` interface.
 
@@ -145,6 +166,14 @@ Episodes allow up to **20** environment steps by default so harder tickets can c
 uv sync
 ```
 
+### Run the official validator (recommended for submission)
+
+This matches the organizer’s 3-step check: Space `/reset` ping, `docker build`, and `openenv validate`.
+
+```bash
+PATH="$(pwd)/.venv/bin:$PATH" bash scripts/validate-submission.sh https://ashwaanthh-supportdesk-env.hf.space .
+```
+
 ### Run Tests
 
 ```bash
@@ -207,6 +236,8 @@ uv run python inference.py --scripted
 - `HF_TOKEN` or `OPENAI_API_KEY`
 
 Optional: `ENV_BASE_URL` pointing at a running server (recommended for judges and CI). If unset, the client tries `SupportDeskEnv.from_docker_image` using `ENV_IMAGE_NAME` (default `supportdesk-env:latest`).
+
+**Required stdout format for evaluation**: `inference.py` emits exactly `[START]`, `[STEP]`, and `[END]` key=value lines per task as specified by the organizer sample script.
 
 ```bash
 export API_BASE_URL="https://api.openai.com/v1"
