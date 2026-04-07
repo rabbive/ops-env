@@ -10,6 +10,10 @@ base_path: /web
 short_description: OpenEnv B2B support triage benchmark
 tags:
 - openenv
+- fastapi
+- benchmark
+- reinforcement-learning
+- evaluation
 ---
 
 # Support Desk Environment
