@@ -1,21 +1,3 @@
----
-title: Support Desk Environment
-emoji: 📨
-colorFrom: blue
-colorTo: green
-sdk: docker
-pinned: false
-app_port: 8000
-base_path: /web
-short_description: OpenEnv B2B support triage benchmark
-tags:
-- openenv
-- fastapi
-- benchmark
-- reinforcement-learning
-- evaluation
----
-
 # Support Desk Environment
 
 **OpenEnv environment for realistic B2B support-desk triage.** Agents must investigate internal docs, route the ticket, draft an internal note + customer reply, then submit. Scoring is **deterministic** and normalized to **[0.0, 1.0]**.
