@@ -7,10 +7,7 @@ sdk: docker
 pinned: false
 app_port: 8000
 base_path: /web
-short_description: >-
-  OpenEnv benchmark for B2B support triage: search internal docs, route tickets, draft notes
-  and customer replies, then submit—deterministic scoring in [0, 1]. Ships FastAPI on :8000
-  plus an optional Gradio panel at /web/ for debugging.
+short_description: OpenEnv B2B support triage benchmark
 tags:
 - openenv
 ---

@@ -1,10 +1,10 @@
 """Baseline inference script for supportdesk_env.
 
-Structured evaluation logs (stdout, one JSON object per line; parseable by automated evaluators):
+STDOUT FORMAT (mandatory for evaluation):
 
-  [START] {\"phase\":\"run\"|\"scripted\", ...}
-  [STEP]  {\"step\":int,\"task_id\":str,\"action\":{...},\"reward\":float,\"score\":float,\"done\":bool}
-  [END]   {\"phase\":\"run\"|\"scripted\",\"scores\":{...},\"average\":float}
+    [START] task=<task_name> env=supportdesk_env model=<model_name>
+    [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
+    [END]   success=<true|false> steps=<n> score=<0.00> rewards=<r1,r2,...,rn>
 
 Human-readable progress goes to stderr unless INFERENCE_VERBOSE=0.
 """
@@ -17,7 +17,7 @@ import os
 import re
 import sys
 import textwrap
-from typing import Any
+from typing import Any, Optional
 
 from openai import OpenAI
 
@@ -34,14 +34,14 @@ except ImportError:  # pragma: no cover - source-tree fallback
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY")
-MODEL_NAME = os.getenv("MODEL_NAME")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 ENV_BASE_URL = os.getenv("ENV_BASE_URL")
-# Hard tasks need 13+ environment steps (search, opens, draft, submit); keep headroom.
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME", "supportdesk-env:latest")
 MAX_STEPS = int(os.getenv("MAX_STEPS", "20"))
 TEMPERATURE = 0
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "350"))
-IMAGE_NAME = os.getenv("ENV_IMAGE_NAME", "supportdesk-env:latest")
 VERBOSE = os.getenv("INFERENCE_VERBOSE", "1") != "0"
+BENCHMARK = "supportdesk_env"
 
 TASK_ORDER = [
     "task_easy_password_reset",
@@ -56,29 +56,61 @@ SYSTEM_PROMPT = textwrap.dedent(
 
     Valid schema:
     {
-      "operation": "select_task|search_docs|open_resource|set_priority|set_queue|set_tags|set_resolution_code|save_internal_note|save_reply|submit",
-      "task_id": "optional string",
-      "query": "optional string",
-      "resource_id": "optional string",
-      "priority": "optional string",
-      "queue": "optional string",
-      "tags": ["optional", "tags"],
-      "resolution_code": "optional string",
-      "text": "optional string"
+      "operation": "<one of the operations below>",
+      "task_id": "string (for select_task)",
+      "query": "string (for search_docs)",
+      "resource_id": "string (for open_resource)",
+      "priority": "low|normal|high|urgent (for set_priority)",
+      "queue": "account_access|billing|account_security|general_support (for set_queue)",
+      "tags": ["tag1","tag2"] (for set_tags),
+      "resolution_code": "send_reset_link|explain_authorization_hold|security_escalation|request_more_info (for set_resolution_code)",
+      "text": "string (for save_internal_note or save_reply)"
     }
 
+    Workflow — follow this order, do NOT repeat steps you already completed:
+    1. search_docs — search once or twice to find relevant resources
+    2. open_resource — open each resource found in search results by its resource_id
+    3. set_queue — set the correct queue based on the ticket and docs
+    4. set_priority — set appropriate priority
+    5. set_tags — set relevant tags
+    6. set_resolution_code — set the resolution code
+    7. save_internal_note — write an internal note summarizing findings
+    8. save_reply — write a professional, policy-safe customer reply
+    9. submit — finalize the ticket
+
     Rules:
-    - Only emit one action.
-    - Prefer investigating internal docs before submitting.
-    - Keep replies concise and policy-safe.
+    - Emit exactly one action per turn.
+    - NEVER repeat the same operation with the same arguments. If search returned results, open them; do not search again.
+    - After searching, always open_resource on the resource_ids from search results before setting fields.
+    - Base queue, priority, tags, and resolution_code on evidence from opened documents.
+    - Keep customer replies concise and policy-safe. Never ask for passwords or credentials.
     """
 ).strip()
 
 
-def _structured_log(tag: str, payload: dict[str, Any]) -> None:
-    """Emit one evaluation line: [TAG] <compact JSON>. Keys sorted for stable ordering."""
-    line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    print(f"[{tag}] {line}")
+# ---------------------------------------------------------------------------
+# Structured stdout logging (matches organizer format exactly)
+# ---------------------------------------------------------------------------
+
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    done_val = str(done).lower()
+    error_val = error if error else "null"
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: list[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
+        flush=True,
+    )
 
 
 def _log_human(msg: str) -> None:
@@ -86,9 +118,55 @@ def _log_human(msg: str) -> None:
         print(msg, file=sys.stderr)
 
 
+# ---------------------------------------------------------------------------
+# Action formatting
+# ---------------------------------------------------------------------------
+
+def _action_str(action: SupportDeskAction) -> str:
+    """Format action as a readable call string, e.g. search_docs('password reset')."""
+    op = action.operation
+    if op == "select_task":
+        return f"select_task('{action.task_id}')"
+    elif op == "search_docs":
+        return f"search_docs('{action.query}')"
+    elif op == "open_resource":
+        return f"open_resource('{action.resource_id}')"
+    elif op == "set_queue":
+        return f"set_queue('{action.queue}')"
+    elif op == "set_priority":
+        return f"set_priority('{action.priority}')"
+    elif op == "set_tags":
+        tags = ",".join(f"'{t}'" for t in (action.tags or []))
+        return f"set_tags([{tags}])"
+    elif op == "set_resolution_code":
+        return f"set_resolution_code('{action.resolution_code}')"
+    elif op == "save_internal_note":
+        text = (action.text or "")[:60]
+        return f"save_internal_note('{text}...')"
+    elif op == "save_reply":
+        text = (action.text or "")[:60]
+        return f"save_reply('{text}...')"
+    elif op == "submit":
+        return "submit()"
+    return f"{op}()"
+
+
 def _action_json(action: SupportDeskAction) -> dict[str, Any]:
     return action.model_dump(mode="json", exclude_none=True)
 
+
+def _get_error(observation: Any) -> Optional[str]:
+    """Extract the last error from recent_feedback, if any."""
+    for fb in reversed(observation.recent_feedback or []):
+        lower = fb.lower()
+        if "error" in lower or "invalid" in lower or "already" in lower or "penalty" in lower:
+            return fb.replace("\n", " ")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Prompt builder
+# ---------------------------------------------------------------------------
 
 def build_prompt(observation: Any) -> str:
     task_lines = []
@@ -162,52 +240,76 @@ def parse_action(response_text: str) -> SupportDeskAction:
     return SupportDeskAction.model_validate(data)
 
 
+# ---------------------------------------------------------------------------
+# Task runner
+# ---------------------------------------------------------------------------
+
 def run_task(env: Any, client: OpenAI, task_id: str) -> float:
     env.reset()
     select_action = SupportDeskAction(operation="select_task", task_id=task_id)
     result = env.step(select_action)
     observation = result.observation
-    _structured_log(
-        "STEP",
-        {
-            "action": _action_json(select_action),
-            "done": bool(result.done),
-            "reward": float(result.reward),
-            "score": float(observation.score),
-            "step": 0,
-            "task_id": task_id,
-        },
+
+    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
+
+    rewards: list[float] = [float(result.reward)]
+    log_step(
+        step=0,
+        action=_action_str(select_action),
+        reward=float(result.reward),
+        done=bool(result.done),
+        error=_get_error(observation),
     )
     _log_human(f"\n=== {task_id} ===\nTask: {observation.task_title}")
+
+    messages: list[dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    recent_action_sigs: list[str] = []
+    steps_taken = 0
 
     for step in range(1, MAX_STEPS + 1):
         if result.done:
             break
+
         prompt = build_prompt(observation)
+        if recent_action_sigs:
+            history_block = "\n".join(f"- {a}" for a in recent_action_sigs[-6:])
+            prompt += f"\n\nYour previous actions this episode (do NOT repeat):\n{history_block}"
+
+        messages.append({"role": "user", "content": prompt})
+        if len(messages) > 12:
+            messages = [messages[0]] + messages[-11:]
+
         completion = client.chat.completions.create(
             model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
+            messages=messages,
             temperature=TEMPERATURE,
             max_tokens=MAX_TOKENS,
         )
         response_text = completion.choices[0].message.content or ""
+        messages.append({"role": "assistant", "content": response_text})
         action = parse_action(response_text)
+
+        action_sig = json.dumps(_action_json(action), sort_keys=True)
+        repeat_count = sum(1 for a in recent_action_sigs if a == action_sig)
+        if repeat_count >= 2:
+            _log_human(f"Step {step}: loop detected, forcing submit")
+            action = SupportDeskAction(operation="submit")
+            action_sig = json.dumps(_action_json(action), sort_keys=True)
+        recent_action_sigs.append(action_sig)
+
         _log_human(f"Step {step}: {action.model_dump(exclude_none=True)}")
         result = env.step(action)
         observation = result.observation
-        _structured_log(
-            "STEP",
-            {
-                "action": _action_json(action),
-                "done": bool(result.done),
-                "reward": float(result.reward),
-                "score": float(observation.score),
-                "step": step,
-                "task_id": task_id,
-            },
+        reward = float(result.reward)
+        rewards.append(reward)
+        steps_taken = step
+
+        log_step(
+            step=step,
+            action=_action_str(action),
+            reward=reward,
+            done=bool(result.done),
+            error=_get_error(observation),
         )
         _log_human(
             f"  reward={result.reward:.3f} done={result.done} score={observation.score:.3f}"
@@ -215,10 +317,49 @@ def run_task(env: Any, client: OpenAI, task_id: str) -> float:
         if result.done:
             break
 
-    final_score = float(observation.score)
+    final_score = min(max(float(observation.score), 0.0), 1.0)
+    success = final_score > 0.0 and result.done
+
+    log_end(
+        success=success,
+        steps=steps_taken,
+        score=final_score,
+        rewards=rewards,
+    )
     _log_human(f"Final score: {final_score:.3f}")
     return final_score
 
+
+# ---------------------------------------------------------------------------
+# Scripted baseline runner (emits same structured logs)
+# ---------------------------------------------------------------------------
+
+def run_scripted() -> None:
+    if run_all_scripted is None:
+        print("scripted_baselines module not found.", file=sys.stderr)
+        sys.exit(1)
+
+    scores = run_all_scripted()
+    for task_id, score in scores.items():
+        log_start(task=task_id, env=BENCHMARK, model="scripted")
+        log_step(step=1, action="scripted_gold_trajectory()", reward=float(score), done=True, error=None)
+        log_end(
+            success=score >= 0.5,
+            steps=1,
+            score=float(score),
+            rewards=[float(score)],
+        )
+
+    _log_human("=== Scripted baseline (deterministic gold trajectories, no LLM) ===")
+    for task_id, score in scores.items():
+        _log_human(f"{task_id}: {score:.3f}")
+    average = sum(scores.values()) / len(scores)
+    _log_human(f"average: {average:.3f}")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="LLM or scripted baseline for supportdesk_env.")
@@ -233,39 +374,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.scripted:
-        if run_all_scripted is None:
-            print("scripted_baselines module not found.", file=sys.stderr)
-            sys.exit(1)
-        _structured_log(
-            "START",
-            {
-                "phase": "scripted",
-                "tasks": list(TASK_ORDER),
-            },
-        )
-        scores = run_all_scripted()
-        for task_id, score in scores.items():
-            _structured_log(
-                "STEP",
-                {
-                    "score": float(score),
-                    "scripted": True,
-                    "task_id": task_id,
-                },
-            )
-        average = sum(scores.values()) / len(scores)
-        _structured_log(
-            "END",
-            {
-                "average": round(average, 6),
-                "phase": "scripted",
-                "scores": {k: float(v) for k, v in scores.items()},
-            },
-        )
-        _log_human("=== Scripted baseline (deterministic gold trajectories, no LLM) ===")
-        for task_id, score in scores.items():
-            _log_human(f"{task_id}: {score:.3f}")
-        _log_human(f"average: {average:.3f}")
+        run_scripted()
         return
 
     if not MODEL_NAME:
@@ -277,22 +386,8 @@ def main() -> None:
 
     if ENV_BASE_URL:
         raw_env = SupportDeskEnv(base_url=ENV_BASE_URL)
-        env_desc: dict[str, Any] = {"env_base_url": ENV_BASE_URL, "kind": "http"}
     else:
-        raw_env = SupportDeskEnv.from_docker_image(IMAGE_NAME)
-        env_desc = {"docker_image": IMAGE_NAME, "kind": "docker"}
-
-    _structured_log(
-        "START",
-        {
-            "api_base_url": API_BASE_URL,
-            "max_steps": MAX_STEPS,
-            "model_name": MODEL_NAME,
-            "phase": "run",
-            "tasks": list(TASK_ORDER),
-            **env_desc,
-        },
-    )
+        raw_env = SupportDeskEnv.from_docker_image(LOCAL_IMAGE_NAME)
 
     env = raw_env.sync()
     scores: dict[str, float] = {}
@@ -302,18 +397,10 @@ def main() -> None:
     finally:
         env.close()
 
-    average = sum(scores.values()) / len(scores)
-    _structured_log(
-        "END",
-        {
-            "average": round(average, 6),
-            "phase": "run",
-            "scores": {k: float(v) for k, v in scores.items()},
-        },
-    )
     _log_human("\n=== Summary ===")
     for task_id, score in scores.items():
         _log_human(f"{task_id}: {score:.3f}")
+    average = sum(scores.values()) / len(scores)
     _log_human(f"average: {average:.3f}")
 
 
