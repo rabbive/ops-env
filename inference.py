@@ -242,93 +242,122 @@ def parse_action(response_text: str) -> SupportDeskAction:
 
 
 # ---------------------------------------------------------------------------
+# Environment setup
+# ---------------------------------------------------------------------------
+
+def build_sync_env() -> Any:
+    """Create a sync env client for either remote or local execution."""
+    if ENV_BASE_URL:
+        return SupportDeskEnv(base_url=ENV_BASE_URL).sync()
+    if LOCAL_IMAGE_NAME:
+        return asyncio.run(SupportDeskEnv.from_docker_image(LOCAL_IMAGE_NAME)).sync()
+    # Fallback for validator/container runs where the env server is already
+    # available inside the same container but ENV_BASE_URL is not set.
+    return SupportDeskEnv(base_url="http://127.0.0.1:8000").sync()
+
+
+# ---------------------------------------------------------------------------
 # Task runner
 # ---------------------------------------------------------------------------
 
-def run_task(env: Any, client: OpenAI, task_id: str) -> float:
-    env.reset()
-    select_action = SupportDeskAction(operation="select_task", task_id=task_id)
-    result = env.step(select_action)
-    observation = result.observation
-
+def run_task(client: OpenAI, task_id: str) -> float:
     log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
-    rewards: list[float] = [float(result.reward)]
-    log_step(
-        step=0,
-        action=_action_str(select_action),
-        reward=float(result.reward),
-        done=bool(result.done),
-        error=_get_error(observation),
-    )
-    _log_human(f"\n=== {task_id} ===\nTask: {observation.task_title}")
-
-    messages: list[dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
-    recent_action_sigs: list[str] = []
+    env = None
+    rewards: list[float] = []
     steps_taken = 0
+    final_score = 0.0
+    success = False
 
-    for step in range(1, MAX_STEPS + 1):
-        if result.done:
-            break
-
-        prompt = build_prompt(observation)
-        if recent_action_sigs:
-            history_block = "\n".join(f"- {a}" for a in recent_action_sigs[-6:])
-            prompt += f"\n\nYour previous actions this episode (do NOT repeat):\n{history_block}"
-
-        messages.append({"role": "user", "content": prompt})
-        if len(messages) > 12:
-            messages = [messages[0]] + messages[-11:]
-
-        completion = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            temperature=TEMPERATURE,
-            max_tokens=MAX_TOKENS,
-        )
-        response_text = completion.choices[0].message.content or ""
-        messages.append({"role": "assistant", "content": response_text})
-        action = parse_action(response_text)
-
-        action_sig = json.dumps(_action_json(action), sort_keys=True)
-        repeat_count = sum(1 for a in recent_action_sigs if a == action_sig)
-        if repeat_count >= 2:
-            _log_human(f"Step {step}: loop detected, forcing submit")
-            action = SupportDeskAction(operation="submit")
-            action_sig = json.dumps(_action_json(action), sort_keys=True)
-        recent_action_sigs.append(action_sig)
-
-        _log_human(f"Step {step}: {action.model_dump(exclude_none=True)}")
-        result = env.step(action)
+    try:
+        env = build_sync_env()
+        env.reset()
+        select_action = SupportDeskAction(operation="select_task", task_id=task_id)
+        result = env.step(select_action)
         observation = result.observation
-        reward = float(result.reward)
-        rewards.append(reward)
-        steps_taken = step
-
+        rewards.append(float(result.reward))
         log_step(
-            step=step,
-            action=_action_str(action),
-            reward=reward,
+            step=0,
+            action=_action_str(select_action),
+            reward=float(result.reward),
             done=bool(result.done),
             error=_get_error(observation),
         )
-        _log_human(
-            f"  reward={result.reward:.3f} done={result.done} score={observation.score:.3f}"
+        _log_human(f"\n=== {task_id} ===\nTask: {observation.task_title}")
+
+        messages: list[dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        recent_action_sigs: list[str] = []
+
+        for step in range(1, MAX_STEPS + 1):
+            if result.done:
+                break
+
+            prompt = build_prompt(observation)
+            if recent_action_sigs:
+                history_block = "\n".join(f"- {a}" for a in recent_action_sigs[-6:])
+                prompt += f"\n\nYour previous actions this episode (do NOT repeat):\n{history_block}"
+
+            messages.append({"role": "user", "content": prompt})
+            if len(messages) > 12:
+                messages = [messages[0]] + messages[-11:]
+
+            completion = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messages,
+                temperature=TEMPERATURE,
+                max_tokens=MAX_TOKENS,
+            )
+            response_text = completion.choices[0].message.content or ""
+            messages.append({"role": "assistant", "content": response_text})
+            action = parse_action(response_text)
+
+            action_sig = json.dumps(_action_json(action), sort_keys=True)
+            repeat_count = sum(1 for a in recent_action_sigs if a == action_sig)
+            if repeat_count >= 2:
+                _log_human(f"Step {step}: loop detected, forcing submit")
+                action = SupportDeskAction(operation="submit")
+                action_sig = json.dumps(_action_json(action), sort_keys=True)
+            recent_action_sigs.append(action_sig)
+
+            _log_human(f"Step {step}: {action.model_dump(exclude_none=True)}")
+            result = env.step(action)
+            observation = result.observation
+            reward = float(result.reward)
+            rewards.append(reward)
+            steps_taken = step
+
+            log_step(
+                step=step,
+                action=_action_str(action),
+                reward=reward,
+                done=bool(result.done),
+                error=_get_error(observation),
+            )
+            _log_human(
+                f"  reward={result.reward:.3f} done={result.done} score={observation.score:.3f}"
+            )
+            if result.done:
+                break
+
+        final_score = min(max(float(observation.score), 0.0), 1.0)
+        success = final_score > 0.0 and result.done
+        _log_human(f"Final score: {final_score:.3f}")
+        return final_score
+    except Exception as exc:
+        _log_human(f"Task {task_id} failed: {exc}")
+        return final_score
+    finally:
+        if env is not None:
+            try:
+                env.close()
+            except Exception as close_exc:
+                _log_human(f"env.close() error: {close_exc}")
+        log_end(
+            success=success,
+            steps=steps_taken,
+            score=final_score,
+            rewards=rewards,
         )
-        if result.done:
-            break
-
-    final_score = min(max(float(observation.score), 0.0), 1.0)
-    success = final_score > 0.0 and result.done
-
-    log_end(
-        success=success,
-        steps=steps_taken,
-        score=final_score,
-        rewards=rewards,
-    )
-    _log_human(f"Final score: {final_score:.3f}")
-    return final_score
 
 
 # ---------------------------------------------------------------------------
@@ -379,28 +408,16 @@ def main() -> None:
         return
 
     if not MODEL_NAME:
-        raise RuntimeError("MODEL_NAME must be set.")
+        print("MODEL_NAME must be set.", file=sys.stderr)
+        return
     if not HF_TOKEN:
-        raise RuntimeError("HF_TOKEN must be set.")
+        print("HF_TOKEN must be set.", file=sys.stderr)
+        return
 
     client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
-
-    if ENV_BASE_URL:
-        raw_env = SupportDeskEnv(base_url=ENV_BASE_URL)
-    else:
-        if not LOCAL_IMAGE_NAME:
-            raise RuntimeError(
-                "LOCAL_IMAGE_NAME must be set when ENV_BASE_URL is not set."
-            )
-        raw_env = asyncio.run(SupportDeskEnv.from_docker_image(LOCAL_IMAGE_NAME))
-
-    env = raw_env.sync()
     scores: dict[str, float] = {}
-    try:
-        for task_id in TASK_ORDER:
-            scores[task_id] = run_task(env, client, task_id)
-    finally:
-        env.close()
+    for task_id in TASK_ORDER:
+        scores[task_id] = run_task(client, task_id)
 
     _log_human("\n=== Summary ===")
     for task_id, score in scores.items():
