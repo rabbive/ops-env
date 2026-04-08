@@ -12,6 +12,7 @@ Human-readable progress goes to stderr unless INFERENCE_VERBOSE=0.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import re
@@ -391,7 +392,7 @@ def main() -> None:
             raise RuntimeError(
                 "LOCAL_IMAGE_NAME must be set when ENV_BASE_URL is not set."
             )
-        raw_env = SupportDeskEnv.from_docker_image(LOCAL_IMAGE_NAME)
+        raw_env = asyncio.run(SupportDeskEnv.from_docker_image(LOCAL_IMAGE_NAME))
 
     env = raw_env.sync()
     scores: dict[str, float] = {}
