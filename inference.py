@@ -33,10 +33,10 @@ except ImportError:  # pragma: no cover - source-tree fallback
     run_all_scripted = None  # type: ignore[misc, assignment]
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-API_KEY = os.getenv("HF_TOKEN") or os.getenv("OPENAI_API_KEY")
+HF_TOKEN = os.getenv("HF_TOKEN")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 ENV_BASE_URL = os.getenv("ENV_BASE_URL")
-LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME", "supportdesk-env:latest")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 MAX_STEPS = int(os.getenv("MAX_STEPS", "20"))
 TEMPERATURE = 0
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "350"))
@@ -379,14 +379,18 @@ def main() -> None:
 
     if not MODEL_NAME:
         raise RuntimeError("MODEL_NAME must be set.")
-    if not API_KEY:
-        raise RuntimeError("HF_TOKEN or OPENAI_API_KEY must be set.")
+    if not HF_TOKEN:
+        raise RuntimeError("HF_TOKEN must be set.")
 
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 
     if ENV_BASE_URL:
         raw_env = SupportDeskEnv(base_url=ENV_BASE_URL)
     else:
+        if not LOCAL_IMAGE_NAME:
+            raise RuntimeError(
+                "LOCAL_IMAGE_NAME must be set when ENV_BASE_URL is not set."
+            )
         raw_env = SupportDeskEnv.from_docker_image(LOCAL_IMAGE_NAME)
 
     env = raw_env.sync()
